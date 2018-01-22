@@ -12,6 +12,7 @@ import sgrnn.reader as reader
 # import util
 
 from tensorflow.python.client import device_lib
+from sgrnn.model import SyntheticGradientRNN
 
 flags = tf.flags
 logging = tf.logging
@@ -74,7 +75,164 @@ class PTBInput(object):
     self.sequence_count = batch.sequence_count
 
 
-class PTBModel(object):
+class PTBModel(SyntheticGradientRNN):
+  def __init__(self, config, is_training):
+    super().__init__()
+    self._config = config
+    self._num_layers = config.num_layers
+    self._is_training = is_training
+    self._output_size = config.vocab_size
+    self._input = None
+    self._batch_size = None
+    self._num_steps = None
+    self._sequence_length = None
+    self._is_done = None
+
+  @property
+  def is_training(self):
+    return self._is_training
+
+  @property
+  def config(self):
+    return self._config
+
+  @property
+  def num_layers(self):
+    return self._num_layers
+
+  @property
+  def input(self):
+    return self._input
+
+  @property
+  def batch_size(self):
+    return self._batch_size
+
+  @property
+  def num_steps(self):
+    return self._num_steps
+
+  @property
+  def sequence_length(self):
+    return self._sequence_length
+
+  @property
+  def is_done(self):
+    return self._is_done
+
+  @property
+  def base_cell(self):
+    if not self._base_cell:
+      self._base_cell = tf.contrib.rnn.MultiRNNCell(
+        [self._make_single_cell() for _ in range(self.num_layers)],
+        state_is_tuple=True)
+    return self._base_cell
+
+  def _make_single_cell(self):
+    cell = self._get_lstm_cell(self.config, self.is_training)
+    if self.is_training and self.config.keep_prob < 1:
+      cell = tf.contrib.rnn.DropoutWrapper(
+        cell, output_keep_prob=self.config.keep_prob)
+    return cell
+
+  def _get_lstm_cell(self, config, is_training):
+    if config.rnn_mode == BASIC:
+      return tf.contrib.rnn.BasicLSTMCell(
+          config.hidden_size, forget_bias=0.0, state_is_tuple=True,
+          reuse=not is_training)
+    if config.rnn_mode == BLOCK:
+      return tf.contrib.rnn.LSTMBlockCell(
+          config.hidden_size, forget_bias=0.0)
+    raise ValueError("rnn_mode %s not supported" % config.rnn_mode)
+
+  def build_graph(self, input_):
+    self._input = input_
+    self._batch_size = input_.batch_size
+    self._num_steps = input_.num_steps
+    self._num_unroll = input_.num_unroll
+    self._state_saver = input_.state_saver
+    self._init_state = [self.state_saver.state(name)
+                        for name in nest.flatten(self.state_name)]
+    self._sequence_length = input_.length
+    self._is_done = tf.equal(input_.sequence, input_.sequence_count - 1)
+    size = self.config.hidden_size
+    vocab_size = self.config.vocab_size
+
+    with tf.device("/cpu:0"):
+      embedding = tf.get_variable(
+          "embedding", [vocab_size, size], dtype=data_type())
+      inputs = tf.nn.embedding_lookup(embedding, input_.input_data)
+      next_inputs = tf.nn.embedding_lookup(embedding, input_.next_input_data)
+
+    if self.is_training and self.config.keep_prob < 1:
+      inputs = tf.nn.dropout(inputs, self.config.keep_prob)
+      next_inputs = tf.nn.dropout(next_inputs, self.config.keep_prob)
+
+    logits, final_state, sg, next_sg = self.build_synthetic_gradient_rnn(
+      inputs, next_inputs, self.sequence_length)
+
+    # Use the contrib sequence loss and average over the batches
+    loss = tf.contrib.seq2seq.sequence_loss(
+        logits,
+        input_.targets,
+        tf.ones([self.batch_size, self.num_unroll], dtype=data_type()),
+        average_across_timesteps=False,
+        average_across_batch=True)
+
+    tvars = tf.trainable_variables()
+
+    grad = self.gradient(loss, tvars, next_sg, final_state)
+    # grad_var = list(zip(grad, tvars))
+
+    sg_target = self.sg_target(loss, next_sg, final_state)
+    sg_loss = tf.losses.mean_squared_error(labels=tf.stack(sg_target), predictions=tf.stack(sg))
+    sg_grad = tf.gradients(ys=sg_loss, xs=tvars)
+
+    # Update the cost
+    self._cost = tf.reduce_sum(loss)
+    self._final_state = final_state
+
+    self._lr = tf.Variable(0.0, trainable=False)
+    grads, _ = tf.clip_by_global_norm(grad,
+                                      self.config.max_grad_norm)
+    optimizer = tf.train.AdamOptimizer(self._lr)
+    self._train_op = optimizer.apply_gradients(
+        zip(grads, tvars),
+        global_step=tf.train.get_or_create_global_step())
+
+    self._new_lr = tf.placeholder(
+        tf.float32, shape=[], name="new_learning_rate")
+    self._lr_update = tf.assign(self._lr, self._new_lr)
+
+    optimizer_sg = tf.train.AdamOptimizer(self._lr)
+    self._train_sg_op = optimizer_sg.apply_gradients(
+      grads_and_vars=zip(sg_grad, tvars),
+      global_step=tf.train.get_or_create_global_step())
+
+  def gradient(self, loss, tvars, next_sg, final_state):
+    grad_local = tf.gradients(ys=loss, xs=tvars, grad_ys=None,
+                              name='local_gradients')
+    received_sg = [tf.where(self.is_done, tf.zeros_like(nsg), nsg) for nsg in next_sg]
+    grad_sg = tf.gradients(
+      ys=nest.flatten(final_state), xs=tvars, grad_ys=received_sg,
+      name='synthetic_gradients')
+    grad = [tf.add(gl, gs) if gs is not None else gl for gl, gs in zip(grad_local, grad_sg)]
+    return grad
+
+  def sg_target(self, loss, next_sg, final_state):
+    local_grad = tf.gradients(ys=loss, xs=nest.flatten(self.init_state))
+    future_grad = tf.gradients(
+      ys=nest.flatten(final_state),
+      xs=nest.flatten(self.init_state), grad_ys=next_sg)
+    # for two sequence, the target is bootstrapped
+    # at the end sequence, the target is only single sequence
+    sg_target = [tf.stop_gradient(
+      tf.where(self.is_done, lg, (lg + fg)))
+      for lg, fg in zip(local_grad, future_grad)]
+    return sg_target
+
+
+class PTBModel_old(object):
   """The PTB model."""
 
   def __init__(self, config, is_training):

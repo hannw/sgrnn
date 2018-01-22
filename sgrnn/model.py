@@ -13,6 +13,8 @@ class SyntheticGradientRNN(object):
     self._output_size = None
     self._num_unroll = None
     self._state_saver = None
+    self._base_cell = None
+    self._init_state = None
 
   @property
   def cell(self):
@@ -54,6 +56,15 @@ class SyntheticGradientRNN(object):
   def state_saver(self):
     return self._state_saver
 
+  @property
+  def init_state(self):
+    if not self._init_state:
+      raise Exception("self._init_state needs to be defined during"
+                      " graph construction time, using the initial"
+                      " state from the state saving queue.")
+    else:
+      return self._init_state
+
   def build_synthetic_gradient_rnn(self, inputs, next_inputs, sequence_length):
     inputs = tf.unstack(inputs, num=self.num_unroll, axis=1)
     next_inputs = tf.unstack(next_inputs, num=self.num_unroll, axis=1)
@@ -76,11 +87,11 @@ class SyntheticGradientRNN(object):
     synthetic_gradient = tf.slice(
       outputs[0], begin=[0, self.output_size], size=[-1, -1])
     synthetic_gradient = tf.split(
-      synthetic_gradient, nest.flatten(self.state_size), axis=2)
+      synthetic_gradient, nest.flatten(self.state_size), axis=1)
     next_synthetic_gradient = tf.slice(
       next_outputs[0], begin=[0, self.output_size], size=[-1, -1])
     next_synthetic_gradient = tf.split(
-      next_synthetic_gradient, nest.flatten(self.state_size), axis=2)
+      next_synthetic_gradient, nest.flatten(self.state_size), axis=1)
 
     with tf.variable_scope('logits'):
       stacked_outputs = tf.stack(outputs, axis=1)
@@ -114,7 +125,6 @@ class SyntheticGradientRNN(object):
         name = 'state_{}'.format(i)
         i += 1
         return name
-
     return gen_state_name(self.state_size)
 
   @property
@@ -128,11 +138,11 @@ class SyntheticGradientRNN(object):
 
   @property
   def state_size(self):
-    return self.cell.state_size
+    return self.base_cell.state_size
 
   @property
   def total_state_size(self):
-    state_sizes = nest.flatten(self.cell.state_size)
+    state_sizes = nest.flatten(self.base_cell.state_size)
     return sum(state_sizes)
 
 
