@@ -114,9 +114,9 @@ def _circular_shift(x, step_size, axis):
 
 def pdb_state_saver(raw_data, batch_size, num_steps, init_states,
   num_unroll, num_threads=3, capacity=1000, allow_small_batch=False, name=None):
+  data_len = len(raw_data)
   with tf.name_scope(name, "PTBProducer", [raw_data, batch_size, num_steps]):
     raw_data = tf.convert_to_tensor(raw_data, name="raw_data", dtype=tf.int32)
-    data_len = tf.size(raw_data)
     n_seq = (data_len - 1) // num_steps
 
     # need to make sure the num_step is multiple of num_unroll
@@ -126,12 +126,12 @@ def pdb_state_saver(raw_data, batch_size, num_steps, init_states,
     raw_data_y = tf.reshape(raw_data[1 : (n_seq * num_steps + 1)],
                       [n_seq, num_steps])
     next_raw_data_y = _circular_shift(raw_data_y, num_unroll, axis=1)
-    keys = tf.range(n_seq)
-    keys = tf.cast(keys, dtype=tf.string)
+    keys = tf.convert_to_tensor(
+      ['seq_{}'.format(i) for i in range(n_seq)], name="key", dtype=tf.string)
     seq_len = tf.tile([num_steps], [n_seq])
     data = tf.data.Dataset.from_tensor_slices(
       (keys, raw_data_x, next_raw_data_x, raw_data_y, next_raw_data_y, seq_len))
-    iterator = data.make_initializable_iterator()
+    iterator = data.make_one_shot_iterator()
     next_key, next_x, next_next_x, next_y, next_next_y, next_len = iterator.get_next()
     seq_dict = {'x':next_x, 'next_x':next_next_x, 'y':next_y, 'next_y':next_next_y}
     batch = batch_sequences_with_states(

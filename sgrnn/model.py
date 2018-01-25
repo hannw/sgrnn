@@ -15,6 +15,11 @@ class SyntheticGradientRNN(object):
     self._state_saver = None
     self._base_cell = None
     self._init_state = None
+    self._cost = None
+
+  @property
+  def cost(self):
+    return self._cost
 
   @property
   def cell(self):
@@ -108,6 +113,11 @@ class SyntheticGradientRNN(object):
     init_states = nest.flatten(init_states)
     init_states = tuple([tf.squeeze(state, axis=0) for state in init_states])
     return init_states
+
+  @property
+  def init_state_dict(self):
+    return {k:v for k, v in zip(
+      nest.flatten(self.state_name), nest.flatten(self.zero_state))}
 
   @property
   def state_name(self):

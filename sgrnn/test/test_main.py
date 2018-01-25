@@ -28,12 +28,6 @@ class BuildGraphTest(tf.test.TestCase):
       'simple-examples', 'data')
     raw_data = reader.ptb_raw_data(data_path)
     train_data, valid_data, test_data, _ = raw_data
-
-    # init_states = {k:v for k, v in zip(model.state_name[0], model.zero_state[0])}
-    # assert False
-    # init_states = {model.state_name: model.zero_state}
-    init_states = {k:v for k, v in zip(
-      nest.flatten(model.state_name), nest.flatten(model.zero_state))}
-    inputs = main.PTBInput(config=config, data=test_data, init_states=init_states)
+    inputs = main.PTBInput(config=config, data=test_data, init_states=model.init_state_dict)
 
     model.build_graph(inputs)

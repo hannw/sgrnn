@@ -8,8 +8,8 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.python.util import nest
 
-import sgrnn.reader as reader
-# import util
+import reader
+import util
 
 from tensorflow.python.client import device_lib
 from sgrnn.model import SyntheticGradientRNN
@@ -87,6 +87,9 @@ class PTBModel(SyntheticGradientRNN):
     self._num_steps = None
     self._sequence_length = None
     self._is_done = None
+
+    self._rnn_params = None
+    self._final_state = None
 
   @property
   def is_training(self):
@@ -171,6 +174,8 @@ class PTBModel(SyntheticGradientRNN):
     logits, final_state, sg, next_sg = self.build_synthetic_gradient_rnn(
       inputs, next_inputs, self.sequence_length)
 
+    self._final_state = final_state
+
     # Use the contrib sequence loss and average over the batches
     loss = tf.contrib.seq2seq.sequence_loss(
         logits,
@@ -191,6 +196,7 @@ class PTBModel(SyntheticGradientRNN):
     # Update the cost
     self._cost = tf.reduce_sum(loss)
     self._final_state = final_state
+    self._sg_cost = sg_loss
 
     self._lr = tf.Variable(0.0, trainable=False)
     grads, _ = tf.clip_by_global_norm(grad,
@@ -208,6 +214,26 @@ class PTBModel(SyntheticGradientRNN):
     self._train_sg_op = optimizer_sg.apply_gradients(
       grads_and_vars=zip(sg_grad, tvars),
       global_step=tf.train.get_or_create_global_step())
+
+  @property
+  def train_op(self):
+    return self._train_op
+
+  @property
+  def train_sg_op(self):
+    return self._train_sg_op
+
+  @property
+  def cost(self):
+    return self._cost
+
+  @property
+  def sg_cost(self):
+    return self._sg_cost
+
+  @property
+  def final_state(self):
+    return self._final_state
 
   def gradient(self, loss, tvars, next_sg, final_state):
     grad_local = tf.gradients(ys=loss, xs=tvars, grad_ys=None,
@@ -221,211 +247,20 @@ class PTBModel(SyntheticGradientRNN):
 
   def sg_target(self, loss, next_sg, final_state):
     local_grad = tf.gradients(ys=loss, xs=nest.flatten(self.init_state))
+    next_sg = [tf.where(self.is_done, tf.zeros_like(grad), grad) for grad in next_sg]
     future_grad = tf.gradients(
       ys=nest.flatten(final_state),
-      xs=nest.flatten(self.init_state), grad_ys=next_sg)
+      xs=nest.flatten(self.init_state),
+      grad_ys=next_sg)
     # for two sequence, the target is bootstrapped
     # at the end sequence, the target is only single sequence
-    sg_target = [tf.stop_gradient(
-      tf.where(self.is_done, lg, (lg + fg)))
+    sg_target = [tf.stop_gradient(tf.add(lg, fg))
       for lg, fg in zip(local_grad, future_grad)]
     return sg_target
 
-
-class PTBModel_old(object):
-  """The PTB model."""
-
-  def __init__(self, config, is_training):
-    self._config = config
-    self._is_training = is_training
-    self._cell = self.make_cell()
-
-    self._is_done = None
-
   @property
-  def cell(self):
-    return self._cell
-
-  @property
-  def config(self):
-    return self._config
-
-  @property
-  def zero_state(self):
-    init_states = self._cell.zero_state(batch_size=1, dtype=tf.float32)
-    def _downrank_zerostates(zs):
-      if isinstance(zs, tuple):
-        return tuple([_downrank_zerostates(s) for s in zs])
-      else:
-        zs = tf.squeeze(zs, axis=0)
-        return zs
-    init_states = _downrank_zerostates(init_states)
-    return init_states
-
-  @property
-  def state_name(self):
-    init_states = self.zero_state
-    i = 0
-    def gen_state_name(zs):
-      nonlocal i
-      if isinstance(zs, tuple):
-        return tuple([gen_state_name(s) for s in zs])
-      else:
-        name = 'state_{}'.format(i)
-        i += 1
-        return name
-    return gen_state_name(init_states)
-
-  @property
-  def sequence_is_done(self):
-    return self._is_done
-
-  @property
-  def is_training(self):
-    return self._is_training
-
-  def build_graph(self, input_):
-    self._input = input_
-    self.batch_size = input_.batch_size
-    self.num_steps = input_.num_steps
-    self.num_unroll = input_.num_unroll
-    self.state_saver = input_.state_saver
-    self.sequence_length = input_.length
-    self._is_done = tf.equal(input_.sequence, input_.sequence_count - 1)
-    size = self.config.hidden_size
-    vocab_size = self.config.vocab_size
-
-    with tf.device("/cpu:0"):
-      embedding = tf.get_variable(
-          "embedding", [vocab_size, size], dtype=data_type())
-      inputs = tf.nn.embedding_lookup(embedding, input_.input_data)
-      next_inputs = tf.nn.embedding_lookup(embedding, input_.next_input_data)
-
-    if self.is_training and self.config.keep_prob < 1:
-      inputs = tf.nn.dropout(inputs, self.config.keep_prob)
-      next_inputs = tf.nn.dropout(next_inputs, self.config.keep_prob)
-
-    logits, final_state, sg, next_sg = self._build_rnn_graph_lstm(
-      inputs, next_inputs, self.sequence_length)
-
-    # Use the contrib sequence loss and average over the batches
-    loss = tf.contrib.seq2seq.sequence_loss(
-        logits,
-        input_.targets,
-        tf.ones([self.batch_size, self.num_unroll], dtype=data_type()),
-        average_across_timesteps=False,
-        average_across_batch=True)
-
-    tvars = tf.trainable_variables()
-
-    grad = self.gradient(loss, tvars, next_sg, final_state)
-    grad_var = list(zip(grad, tvars))
-
-    sg_target = self.sg_target(loss, tvars, next_sg, final_state)
-    sg_loss = tf.losses.mean_squared_error(labels=sg_target, predictions=sg)
-    sg_grad = tf.gradient(ys=sg_loss, xs=tvars)
-
-
-    # Update the cost
-    self._cost = tf.reduce_sum(loss)
-    self._final_state = final_state
-
-    self._lr = tf.Variable(0.0, trainable=False)
-    grads, _ = tf.clip_by_global_norm(grad,
-                                      self.config.max_grad_norm)
-    optimizer = tf.train.AdamOptimizer(self._lr)
-    self._train_op = optimizer.apply_gradients(
-        zip(grads, tvars),
-        global_step=tf.train.get_or_create_global_step())
-
-    self._new_lr = tf.placeholder(
-        tf.float32, shape=[], name="new_learning_rate")
-    self._lr_update = tf.assign(self._lr, self._new_lr)
-
-    optimizer_sg = tf.train.AdamOptimizer(self._lr)
-    self._train_sg_op = optimizer_sg.apply_gradients(
-      grads_and_vars=zip(sg_grad, tvars),
-      global_step=tf.train.get_or_create_global_step())
-
-  def gradient(self, loss, tvars, next_sg, final_state):
-    grad_local = tf.gradients(ys=loss, xs=tvars, grad_ys=None,
-                  name='local_gradients')
-    grad_sg = tf.gradients(
-      ys=final_state, xs=tvars, grad_ys=next_sg,
-      name='synthetic_gradients')
-    grad = grad_local + grad_sg
-    return grad
-
-  def sg_target(self, loss, tvars, next_sg, final_state):
-    sg_target = (tf.gradients(ys=loss, xs=self.initial_state)
-      + tf.gradients(
-        ys=final_state, xs=self.initial_state, grad_ys=next_sg))
-    return tf.stop_gradient(sg_target, name='sg_target')
-
-  def _get_lstm_cell(self, config, is_training):
-    if config.rnn_mode == BASIC:
-      return tf.contrib.rnn.BasicLSTMCell(
-          config.hidden_size, forget_bias=0.0, state_is_tuple=True,
-          reuse=not is_training)
-    if config.rnn_mode == BLOCK:
-      return tf.contrib.rnn.LSTMBlockCell(
-          config.hidden_size, forget_bias=0.0)
-    raise ValueError("rnn_mode %s not supported" % config.rnn_mode)
-
-  def _make_single_cell(self):
-    cell = self._get_lstm_cell(self.config, self.is_training)
-    if self.is_training and self.config.keep_prob < 1:
-      cell = tf.contrib.rnn.DropoutWrapper(
-        cell, output_keep_prob=self.config.keep_prob)
-    return cell
-
-  def make_cell(self):
-    cell = tf.contrib.rnn.MultiRNNCell(
-      [self._make_single_cell() for _ in range(self.config.num_layers)],
-      state_is_tuple=True)
-    n_hidden = self.config.hidden_size
-    total_hidden_size = n_hidden * 2 * self.config.num_layers
-    output_size = self.config.vocab_size
-    cell = tf.contrib.rnn.OutputProjectionWrapper(
-      cell, output_size + total_hidden_size)
-    return cell
-
-  def _build_rnn_graph_lstm(
-        self, inputs, next_inputs, sequence_length):
-
-    inputs = tf.unstack(inputs, num=self.num_unroll, axis=1)
-    next_inputs = tf.unstack(next_inputs, num=self.num_unroll, axis=1)
-
-    with tf.variable_scope('RNN') as scope:
-      outputs, final_state = tf.nn.static_state_saving_rnn(
-        cell=self.cell,
-        inputs=inputs,
-        state_saver=self.state_saver,
-        state_name=self.state_name,
-        sequence_length=sequence_length)
-
-    with tf.variable_scope(scope, reuse=True):
-      next_outputs, next_final_state = tf.nn.static_rnn(
-          cell=self.cell,
-          inputs=next_inputs,
-          initial_state=final_state,
-          sequence_length=sequence_length)
-
-    output_size = self.config.vocab_size
-
-    synthetic_gradient = tf.slice(
-      outputs[0], begin=[0, output_size], size=[-1, -1])
-    next_synthetic_gradient = tf.slice(
-      next_outputs[0], begin=[0, output_size], size=[-1, -1])
-
-    assert False
-
-    with tf.variable_scope('logits'):
-      logits = [tf.slice(output, begin=[0, 0], size=[-1, -1]) for output in outputs]
-      logits = [tf.expand_dims(logit, axis=1) for logit in logits]
-      logits = tf.concat(logits, axis=1)
-
-    return logits, final_state, synthetic_gradient, next_synthetic_gradient
+  def lr(self):
+    return self._lr
 
   def assign_lr(self, session, lr_value):
     session.run(self._lr_update, feed_dict={self._new_lr: lr_value})
@@ -442,7 +277,7 @@ class PTBModel_old(object):
       tf.add_to_collection(name, op)
     self._initial_state_name = util.with_prefix(self._name, "initial")
     self._final_state_name = util.with_prefix(self._name, "final")
-    util.export_state_tuples(self._initial_state, self._initial_state_name)
+    util.export_state_tuples(self._init_state, self._initial_state_name)
     util.export_state_tuples(self._final_state, self._final_state_name)
 
   def import_ops(self):
@@ -467,42 +302,6 @@ class PTBModel_old(object):
         self._initial_state, self._initial_state_name, num_replicas)
     self._final_state = util.import_state_tuples(
         self._final_state, self._final_state_name, num_replicas)
-
-  @property
-  def input(self):
-    return self._input
-
-  @property
-  def initial_state(self):
-    return self._initial_state
-
-  @property
-  def cost(self):
-    return self._cost
-
-  @property
-  def final_state(self):
-    return self._final_state
-
-  @property
-  def lr(self):
-    return self._lr
-
-  @property
-  def train_op(self):
-    return self._train_op
-
-  @property
-  def train_sg_op(self):
-    return self._train_sg_op
-
-  @property
-  def initial_state_name(self):
-    return self._initial_state_name
-
-  @property
-  def final_state_name(self):
-    return self._final_state_name
 
 
 class SmallConfig(object):
@@ -568,35 +367,39 @@ class TestConfig(object):
   max_max_epoch = 1
   keep_prob = 1.0
   lr_decay = 0.5
-  batch_size = 20
+  batch_size = 8
   vocab_size = 10000
   rnn_mode = BLOCK
   num_unroll = 3
 
 
-def run_epoch(session, model, eval_op=None, verbose=False):
+def run_epoch(session, model, eval_ops=None, verbose=False):
   """Runs the model on the given data."""
   start_time = time.time()
   costs = 0.0
   iters = 0
-  state = session.run(model.initial_state)
+  # state = session.run(model.initial_state)
 
   fetches = {
       "cost": model.cost,
       "final_state": model.final_state,
+      "sg_cost": model.sg_cost
   }
-  if eval_op is not None:
-    fetches["eval_op"] = eval_op
+
+  # if eval_op is not None:
+  #   fetches["eval_op"] = eval_op
+  fetches.update(eval_ops)
 
   for step in range(model.input.epoch_size):
     feed_dict = {}
-    for i, (c, h) in enumerate(model.initial_state):
-      feed_dict[c] = state[i].c
-      feed_dict[h] = state[i].h
+    # for i, (c, h) in enumerate(model.initial_state):
+    #   feed_dict[c] = state[i].c
+    #   feed_dict[h] = state[i].h
 
     vals = session.run(fetches, feed_dict)
     cost = vals["cost"]
     state = vals["final_state"]
+
 
     costs += cost
     iters += model.input.num_steps
@@ -633,14 +436,6 @@ def get_config():
 def main(_):
   if not FLAGS.data_path:
     raise ValueError("Must set --data_path to PTB data directory")
-  gpus = [
-      x.name for x in device_lib.list_local_devices() if x.device_type == "GPU"
-  ]
-  if FLAGS.num_gpus > len(gpus):
-    raise ValueError(
-        "Your machine has only %d gpus "
-        "which is less than the requested --num_gpus=%d."
-        % (len(gpus), FLAGS.num_gpus))
 
   raw_data = reader.ptb_raw_data(FLAGS.data_path)
   train_data, valid_data, test_data, _ = raw_data
@@ -650,66 +445,153 @@ def main(_):
   eval_config.batch_size = 1
   eval_config.num_steps = 1
 
-  with tf.Graph().as_default():
-    initializer = tf.random_uniform_initializer(-config.init_scale,
-                                                config.init_scale)
+  initializer = tf.random_uniform_initializer(-config.init_scale,
+                                              config.init_scale)
 
-    with tf.name_scope("Train"):
-      train_input = PTBInput(config=config, data=train_data, name="TrainInput")
-      with tf.variable_scope("Model", reuse=None, initializer=initializer):
-        m = PTBModel(is_training=True, config=config, input_=train_input)
-      tf.summary.scalar("Training Loss", m.cost)
-      tf.summary.scalar("Learning Rate", m.lr)
+  with tf.name_scope("Train"):
 
-    with tf.name_scope("Valid"):
-      valid_input = PTBInput(config=config, data=valid_data, name="ValidInput")
-      with tf.variable_scope("Model", reuse=True, initializer=initializer):
-        mvalid = PTBModel(is_training=False, config=config, input_=valid_input)
-      tf.summary.scalar("Validation Loss", mvalid.cost)
+    with tf.variable_scope("Model", reuse=None, initializer=initializer):
+      m = PTBModel(is_training=True, config=config)
+      train_input = PTBInput(
+        config=config, data=train_data, name="TrainInput",
+        init_states=m.init_state_dict)
+      m.build_graph(train_input)
+    tf.summary.scalar("Training Loss", m.cost)
+    tf.summary.scalar("Learning Rate", m.lr)
 
-    with tf.name_scope("Test"):
+  with tf.name_scope("Valid"):
+
+    with tf.variable_scope("Model", reuse=True, initializer=initializer):
+      mvalid = PTBModel(is_training=False, config=config)
+      valid_input = PTBInput(
+        config=config, data=valid_data, name="ValidInput",
+        init_states=mvalid.init_state_dict)
+      mvalid.build_graph(valid_input)
+    tf.summary.scalar("Validation Loss", mvalid.cost)
+
+  with tf.name_scope("Test"):
+
+    with tf.variable_scope("Model", reuse=True, initializer=initializer):
+      mtest = PTBModel(is_training=False, config=eval_config)
       test_input = PTBInput(
-          config=eval_config, data=test_data, name="TestInput")
-      with tf.variable_scope("Model", reuse=True, initializer=initializer):
-        mtest = PTBModel(is_training=False, config=eval_config,
-                         input_=test_input)
+        config=eval_config, data=test_data,
+        init_states=mtest.init_state_dict,name="TestInput")
+      mtest.build_graph(test_input)
 
-    models = {"Train": m, "Valid": mvalid, "Test": mtest}
-    for name, model in models.items():
-      model.export_ops(name)
-    metagraph = tf.train.export_meta_graph()
-    if tf.__version__ < "1.1.0" and FLAGS.num_gpus > 1:
-      raise ValueError("num_gpus > 1 is not supported for TensorFlow versions "
-                       "below 1.1.0")
-    soft_placement = False
-    if FLAGS.num_gpus > 1:
-      soft_placement = True
-      util.auto_parallel(metagraph, m)
+  # models = {"Train": m, "Valid": mvalid, "Test": mtest}
 
-  with tf.Graph().as_default():
-    tf.train.import_meta_graph(metagraph)
-    for model in models.values():
-      model.import_ops()
-    sv = tf.train.Supervisor(logdir=FLAGS.save_path)
-    config_proto = tf.ConfigProto(allow_soft_placement=soft_placement)
-    with sv.managed_session(config=config_proto) as session:
-      for i in range(config.max_max_epoch):
-        lr_decay = config.lr_decay ** max(i + 1 - config.max_epoch, 0.0)
-        m.assign_lr(session, config.learning_rate * lr_decay)
+  with tf.Session() as session:
+    print("begin training")
+    session.run(tf.global_variables_initializer())
+    coord = tf.train.Coordinator()
+    tf.train.start_queue_runners(sess=session, coord=coord)
+    for i in range(config.max_max_epoch):
+      lr_decay = config.lr_decay ** max(i + 1 - config.max_epoch, 0.0)
+      m.assign_lr(session, config.learning_rate * lr_decay)
 
-        print("Epoch: %d Learning rate: %.3f" % (i + 1, session.run(m.lr)))
-        train_perplexity = run_epoch(session, m, eval_op=m.train_op,
-                                     verbose=True)
-        print("Epoch: %d Train Perplexity: %.3f" % (i + 1, train_perplexity))
-        valid_perplexity = run_epoch(session, mvalid)
-        print("Epoch: %d Valid Perplexity: %.3f" % (i + 1, valid_perplexity))
+      print("Epoch: %d Learning rate: %.3f" % (i + 1, session.run(m.lr)))
+      train_perplexity = run_epoch(
+        session, m,
+        eval_ops={"train": m.train_op, "train_sg": m.train_sg_op},
+        verbose=True)
+      print("Epoch: %d Train Perplexity: %.3f" % (i + 1, train_perplexity))
+      valid_perplexity = run_epoch(session, mvalid)
+      print("Epoch: %d Valid Perplexity: %.3f" % (i + 1, valid_perplexity))
 
-      test_perplexity = run_epoch(session, mtest)
-      print("Test Perplexity: %.3f" % test_perplexity)
+    test_perplexity = run_epoch(session, mtest)
+    print("Test Perplexity: %.3f" % test_perplexity)
 
-      if FLAGS.save_path:
-        print("Saving model to %s." % FLAGS.save_path)
-        sv.saver.save(session, FLAGS.save_path, global_step=sv.global_step)
+
+# def main(_):
+#   if not FLAGS.data_path:
+#     raise ValueError("Must set --data_path to PTB data directory")
+#   gpus = [
+#       x.name for x in device_lib.list_local_devices() if x.device_type == "GPU"
+#   ]
+#   if FLAGS.num_gpus > len(gpus):
+#     raise ValueError(
+#         "Your machine has only %d gpus "
+#         "which is less than the requested --num_gpus=%d."
+#         % (len(gpus), FLAGS.num_gpus))
+#
+#   raw_data = reader.ptb_raw_data(FLAGS.data_path)
+#   train_data, valid_data, test_data, _ = raw_data
+#
+#   config = get_config()
+#   eval_config = get_config()
+#   eval_config.batch_size = 1
+#   eval_config.num_steps = 1
+#
+#   with tf.Graph().as_default():
+#     initializer = tf.random_uniform_initializer(-config.init_scale,
+#                                                 config.init_scale)
+#
+#     with tf.name_scope("Train"):
+#
+#       with tf.variable_scope("Model", reuse=None, initializer=initializer):
+#         m = PTBModel(is_training=True, config=config)
+#         train_input = PTBInput(
+#           config=config, data=train_data, name="TrainInput",
+#           init_states=m.init_state_dict)
+#         m.build_graph(train_input)
+#       tf.summary.scalar("Training Loss", m.cost)
+#       tf.summary.scalar("Learning Rate", m.lr)
+#
+#     with tf.name_scope("Valid"):
+#
+#       with tf.variable_scope("Model", reuse=True, initializer=initializer):
+#         mvalid = PTBModel(is_training=False, config=config)
+#         valid_input = PTBInput(
+#           config=config, data=valid_data, name="ValidInput",
+#           init_states=mvalid.init_state_dict)
+#         mvalid.build_graph(valid_input)
+#       tf.summary.scalar("Validation Loss", mvalid.cost)
+#
+#     with tf.name_scope("Test"):
+#
+#       with tf.variable_scope("Model", reuse=True, initializer=initializer):
+#         mtest = PTBModel(is_training=False, config=eval_config)
+#         test_input = PTBInput(
+#           config=eval_config, data=test_data,
+#           init_states=mtest.init_state_dict,name="TestInput")
+#         mtest.build_graph(test_input)
+#
+#     models = {"Train": m, "Valid": mvalid, "Test": mtest}
+#     for name, model in models.items():
+#       model.export_ops(name)
+#     metagraph = tf.train.export_meta_graph()
+#     if tf.__version__ < "1.1.0" and FLAGS.num_gpus > 1:
+#       raise ValueError("num_gpus > 1 is not supported for TensorFlow versions "
+#                        "below 1.1.0")
+#     soft_placement = False
+#     if FLAGS.num_gpus > 1:
+#       soft_placement = True
+#       util.auto_parallel(metagraph, m)
+#
+#   with tf.Graph().as_default():
+#     tf.train.import_meta_graph(metagraph)
+#     for model in models.values():
+#       model.import_ops()
+#     sv = tf.train.Supervisor(logdir=FLAGS.save_path)
+#     config_proto = tf.ConfigProto(allow_soft_placement=soft_placement)
+#     with sv.managed_session(config=config_proto) as session:
+#       for i in range(config.max_max_epoch):
+#         lr_decay = config.lr_decay ** max(i + 1 - config.max_epoch, 0.0)
+#         m.assign_lr(session, config.learning_rate * lr_decay)
+#
+#         print("Epoch: %d Learning rate: %.3f" % (i + 1, session.run(m.lr)))
+#         train_perplexity = run_epoch(session, m, eval_op=m.train_op,
+#                                      verbose=True)
+#         print("Epoch: %d Train Perplexity: %.3f" % (i + 1, train_perplexity))
+#         valid_perplexity = run_epoch(session, mvalid)
+#         print("Epoch: %d Valid Perplexity: %.3f" % (i + 1, valid_perplexity))
+#
+#       test_perplexity = run_epoch(session, mtest)
+#       print("Test Perplexity: %.3f" % test_perplexity)
+#
+#       if FLAGS.save_path:
+#         print("Saving model to %s." % FLAGS.save_path)
+#         sv.saver.save(session, FLAGS.save_path, global_step=sv.global_step)
 
 
 if __name__ == "__main__":

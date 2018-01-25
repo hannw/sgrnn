@@ -29,6 +29,13 @@ class PDBTest(test.TestCase):
     batch = reader.pdb_state_saver(raw_data=test_data, batch_size=8, num_steps=64, init_states=init_states,
       num_unroll=8, num_threads=3, capacity=1000, allow_small_batch=False, name=None)
 
+    with self.test_session() as sess:
+      sess.run(tf.global_variables_initializer())
+      coord = tf.train.Coordinator()
+      tf.train.start_queue_runners(sess=sess, coord=coord)
+      val = sess.run([batch.sequences['x']])
+      print(val)
+
 class BarrierTest(test.TestCase):
   def testInsertMany(self):
     with self.test_session():
