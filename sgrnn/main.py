@@ -392,6 +392,7 @@ def run_epoch(session, model, global_step, train_ops=None,
       "sg_cost": model.sg_cost
   }
 
+  is_training = False
   if train_ops is not None:
     fetches.update(train_ops)
     is_training = True
