@@ -379,7 +379,7 @@ class TestConfig(object):
   num_unroll = 3
 
 
-def run_epoch(session, model, eval_ops=None,
+def run_epoch(session, model, global_step, train_ops=None,
               summary_op=None, verbose=False, summary_writer=None):
   """Runs the model on the given data."""
   start_time = time.time()
@@ -392,8 +392,9 @@ def run_epoch(session, model, eval_ops=None,
       "sg_cost": model.sg_cost
   }
 
-  if eval_ops is not None:
-    fetches.update(eval_ops)
+  if train_ops is not None:
+    fetches.update(train_ops)
+    is_training = True
 
   if summary_op is not None:
     summary_dict = {'summary': summary_op}
@@ -404,10 +405,12 @@ def run_epoch(session, model, eval_ops=None,
   fetches_w_summary.update(summary_dict)
 
   for step in range(model.input.epoch_size):
+    if is_training:
+      global_step += 1
     if step % 10 == 0:
       vals = session.run(fetches_w_summary)
       summary = vals['summary']
-      summary_writer.add_summary(summary)
+      summary_writer.add_summary(summary, global_step)
     else:
       vals = session.run(fetches)
 
@@ -422,7 +425,7 @@ def run_epoch(session, model, eval_ops=None,
              iters * model.input.batch_size * max(1, FLAGS.num_gpus) /
              (time.time() - start_time)))
 
-  return np.exp(costs / iters)
+  return np.exp(costs / iters), global_step
 
 
 def get_config():
@@ -505,17 +508,18 @@ def main(_):
     threads = tf.train.start_queue_runners(sess=session, coord=coord)
 
     session.run(tf.global_variables_initializer())
+    global_step = 0
     for i in range(config.max_max_epoch):
       lr_decay = config.lr_decay ** max(i + 1. - config.max_epoch, 0.0)
       m.assign_lr(session, config.learning_rate * lr_decay)
 
       print("Epoch: %d Learning rate: %.3f" % (i + 1, session.run(m.lr)))
-      train_perplexity = run_epoch(
-        session, m,
-        eval_ops={"train": m.train_op, "train_sg": m.train_sg_op},
+      train_perplexity, global_step = run_epoch(
+        session, m, global_step=global_step,
+        train_ops={"train": m.train_op, "train_sg": m.train_sg_op},
         verbose=True, summary_op=summary_op, summary_writer=train_writer)
       print("Epoch: %d Train Perplexity: %.3f" % (i + 1, train_perplexity))
-      valid_perplexity = run_epoch(session, mvalid,
+      valid_perplexity = run_epoch(session, mvalid, global_step=global_step,
                                    summary_op=summary_op, summary_writer=valid_writer)
       print("Epoch: %d Valid Perplexity: %.3f" % (i + 1, valid_perplexity))
 
