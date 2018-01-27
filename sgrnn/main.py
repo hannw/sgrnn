@@ -205,6 +205,8 @@ class PTBModel(SyntheticGradientRNN):
     self._lr = tf.Variable(0.0, trainable=False)
     grads, _ = tf.clip_by_global_norm(grad,
                                       self.config.max_grad_norm)
+    sg_grad, _ = tf.clip_by_global_norm(sg_grad,
+                                        self.config.max_grad_norm)
     optimizer = tf.train.AdamOptimizer(self._lr)
     self._train_op = optimizer.apply_gradients(
         zip(grads, tvars),
@@ -383,7 +385,6 @@ def run_epoch(session, model, eval_ops=None,
   start_time = time.time()
   costs = 0.0
   iters = 0
-  # state = session.run(model.initial_state)
 
   fetches = {
       "cost": model.cost,
@@ -391,12 +392,16 @@ def run_epoch(session, model, eval_ops=None,
       "sg_cost": model.sg_cost
   }
 
-  # if eval_op is not None:
-  #   fetches["eval_op"] = eval_op
-  fetches.update(eval_ops)
+  if eval_ops is not None:
+    fetches.update(eval_ops)
+
+  if summary_op is not None:
+    summary_dict = {'summary': summary_op}
+  else:
+    summary_dict = {}
 
   fetches_w_summary = copy.copy(fetches)
-  fetches_w_summary.update({'summary': summary_op})
+  fetches_w_summary.update(summary_dict)
 
   for step in range(model.input.epoch_size):
     if step % 10 == 0:
@@ -407,7 +412,6 @@ def run_epoch(session, model, eval_ops=None,
       vals = session.run(fetches)
 
     cost = vals["cost"]
-    state = vals["final_state"]
 
     costs += cost
     iters += model.input.num_steps
@@ -498,7 +502,7 @@ def main(_):
     valid_writer = tf.summary.FileWriter(FLAGS.save_path + '/valid')
     print("begin training")
     coord = tf.train.Coordinator()
-    tf.train.start_queue_runners(sess=session, coord=coord)
+    threads = tf.train.start_queue_runners(sess=session, coord=coord)
 
     session.run(tf.global_variables_initializer())
     for i in range(config.max_max_epoch):
@@ -515,6 +519,8 @@ def main(_):
                                    summary_op=summary_op, summary_writer=valid_writer)
       print("Epoch: %d Valid Perplexity: %.3f" % (i + 1, valid_perplexity))
 
+    coord.request_stop()
+    coord.join(threads)
     # test_perplexity = run_epoch(session, mtest)
     # print("Test Perplexity: %.3f" % test_perplexity)
 
