@@ -3,6 +3,7 @@ from __future__ import division
 from __future__ import print_function
 
 import time
+import copy
 
 import numpy as np
 import tensorflow as tf
@@ -12,6 +13,7 @@ import reader
 import util
 
 from tensorflow.python.client import device_lib
+from tensorflow.python import debug as tf_debug
 from sgrnn.model import SyntheticGradientRNN
 
 flags = tf.flags
@@ -22,7 +24,7 @@ flags.DEFINE_string(
     "A type of model. Possible options are: small, medium, large.")
 flags.DEFINE_string("data_path", None,
                     "Where the training/test data is stored.")
-flags.DEFINE_string("save_path", None,
+flags.DEFINE_string("save_path", '/tmp/sgrnn/',
                     "Model output directory.")
 flags.DEFINE_bool("use_fp16", False,
                   "Train using 16-bit floats instead of 32bit floats")
@@ -57,14 +59,15 @@ class PTBInput(object):
   def __init__(self, config, data, init_states, name=None):
     self.batch_size = batch_size = config.batch_size
     self.num_steps = num_steps = config.num_steps
-    self.epoch_size = ((len(data) // batch_size) - 1) // num_steps
+    # self.epoch_size = ((len(data) // batch_size) - 1) // num_steps
+    self.epoch_size = (len(data) - 1) // config.num_unroll // batch_size
     self.num_unroll = num_unroll = config.num_unroll
     self.output_size = config.vocab_size
     batch = reader.pdb_state_saver(
       raw_data=data, batch_size=batch_size,
       num_steps=num_steps, init_states=init_states,
       num_unroll=num_unroll, num_threads=3, capacity=1000,
-      allow_small_batch=False)
+      allow_small_batch=False, epoch=1000)
     self.input_data = batch.sequences['x']
     self.next_input_data = batch.sequences['next_x']
     self.targets = batch.sequences['y']
@@ -183,6 +186,7 @@ class PTBModel(SyntheticGradientRNN):
         tf.ones([self.batch_size, self.num_unroll], dtype=data_type()),
         average_across_timesteps=False,
         average_across_batch=True)
+    loss = tf.reduce_sum(loss, axis=0, keep_dims=False)
 
     tvars = tf.trainable_variables()
 
@@ -373,7 +377,8 @@ class TestConfig(object):
   num_unroll = 3
 
 
-def run_epoch(session, model, eval_ops=None, verbose=False):
+def run_epoch(session, model, eval_ops=None,
+              summary_op=None, verbose=False, summary_writer=None):
   """Runs the model on the given data."""
   start_time = time.time()
   costs = 0.0
@@ -390,16 +395,19 @@ def run_epoch(session, model, eval_ops=None, verbose=False):
   #   fetches["eval_op"] = eval_op
   fetches.update(eval_ops)
 
-  for step in range(model.input.epoch_size):
-    feed_dict = {}
-    # for i, (c, h) in enumerate(model.initial_state):
-    #   feed_dict[c] = state[i].c
-    #   feed_dict[h] = state[i].h
+  fetches_w_summary = copy.copy(fetches)
+  fetches_w_summary.update({'summary': summary_op})
 
-    vals = session.run(fetches, feed_dict)
+  for step in range(model.input.epoch_size):
+    if step % 10 == 0:
+      vals = session.run(fetches_w_summary)
+      summary = vals['summary']
+      summary_writer.add_summary(summary)
+    else:
+      vals = session.run(fetches)
+
     cost = vals["cost"]
     state = vals["final_state"]
-
 
     costs += cost
     iters += model.input.num_steps
@@ -441,9 +449,9 @@ def main(_):
   train_data, valid_data, test_data, _ = raw_data
 
   config = get_config()
-  eval_config = get_config()
-  eval_config.batch_size = 1
-  eval_config.num_steps = 1
+  # eval_config = get_config()
+  # eval_config.batch_size = 1
+  # eval_config.num_steps = 1
 
   initializer = tf.random_uniform_initializer(-config.init_scale,
                                               config.init_scale)
@@ -469,37 +477,46 @@ def main(_):
       mvalid.build_graph(valid_input)
     tf.summary.scalar("Validation Loss", mvalid.cost)
 
-  with tf.name_scope("Test"):
+  summary_op = tf.summary.merge_all()
 
-    with tf.variable_scope("Model", reuse=True, initializer=initializer):
-      mtest = PTBModel(is_training=False, config=eval_config)
-      test_input = PTBInput(
-        config=eval_config, data=test_data,
-        init_states=mtest.init_state_dict,name="TestInput")
-      mtest.build_graph(test_input)
+  # with tf.name_scope("Test"):
+  #
+  #   with tf.variable_scope("Model", reuse=True, initializer=initializer):
+  #     mtest = PTBModel(is_training=False, config=eval_config)
+  #     test_input = PTBInput(
+  #       config=eval_config, data=test_data,
+  #       init_states=mtest.init_state_dict,name="TestInput")
+  #     mtest.build_graph(test_input)
 
   # models = {"Train": m, "Valid": mvalid, "Test": mtest}
 
+
   with tf.Session() as session:
+    # session = tf_debug.LocalCLIDebugWrapperSession(session)
+    train_writer = tf.summary.FileWriter(FLAGS.save_path + '/train',
+                                         session.graph)
+    valid_writer = tf.summary.FileWriter(FLAGS.save_path + '/valid')
     print("begin training")
-    session.run(tf.global_variables_initializer())
     coord = tf.train.Coordinator()
     tf.train.start_queue_runners(sess=session, coord=coord)
+
+    session.run(tf.global_variables_initializer())
     for i in range(config.max_max_epoch):
-      lr_decay = config.lr_decay ** max(i + 1 - config.max_epoch, 0.0)
+      lr_decay = config.lr_decay ** max(i + 1. - config.max_epoch, 0.0)
       m.assign_lr(session, config.learning_rate * lr_decay)
 
       print("Epoch: %d Learning rate: %.3f" % (i + 1, session.run(m.lr)))
       train_perplexity = run_epoch(
         session, m,
         eval_ops={"train": m.train_op, "train_sg": m.train_sg_op},
-        verbose=True)
+        verbose=True, summary_op=summary_op, summary_writer=train_writer)
       print("Epoch: %d Train Perplexity: %.3f" % (i + 1, train_perplexity))
-      valid_perplexity = run_epoch(session, mvalid)
+      valid_perplexity = run_epoch(session, mvalid,
+                                   summary_op=summary_op, summary_writer=valid_writer)
       print("Epoch: %d Valid Perplexity: %.3f" % (i + 1, valid_perplexity))
 
-    test_perplexity = run_epoch(session, mtest)
-    print("Test Perplexity: %.3f" % test_perplexity)
+    # test_perplexity = run_epoch(session, mtest)
+    # print("Test Perplexity: %.3f" % test_perplexity)
 
 
 # def main(_):

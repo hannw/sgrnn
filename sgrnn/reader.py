@@ -104,33 +104,42 @@ def ptb_producer(raw_data, batch_size, num_steps, name=None):
     return x, y
 
 
-def _circular_shift(x, step_size, axis):
+# def _circular_shift(x, step_size, axis):
+#   with tf.name_scope("circular_shift"):
+#     size = tf.shape(x)[axis]
+#     x0, x1 = tf.split(x, [step_size, size - step_size], axis=axis)
+#     x = tf.concat([x1, x0], axis=axis)
+#     assert False
+#   return x
+
+def _circular_shift(x, step_size, num_steps):
   with tf.name_scope("circular_shift"):
-    size = tf.shape(x)[axis]
-    x0, x1 = tf.split(x, [step_size, size - step_size], axis=axis)
-    x = tf.concat([x1, x0], axis=axis)
+    x0, x1 = tf.split(x, [step_size, num_steps - step_size], axis=1)
+    x = tf.concat([x1, x0], axis=1)
   return x
 
 
 def pdb_state_saver(raw_data, batch_size, num_steps, init_states,
-  num_unroll, num_threads=3, capacity=1000, allow_small_batch=False, name=None):
+  num_unroll, num_threads=3, capacity=1000, allow_small_batch=False,
+                    epoch=1000, name=None):
   data_len = len(raw_data)
   with tf.name_scope(name, "PTBProducer", [raw_data, batch_size, num_steps]):
     raw_data = tf.convert_to_tensor(raw_data, name="raw_data", dtype=tf.int32)
     n_seq = (data_len - 1) // num_steps
-
     # need to make sure the num_step is multiple of num_unroll
     raw_data_x = tf.reshape(raw_data[0 : n_seq * num_steps],
                       [n_seq, num_steps])
-    next_raw_data_x = _circular_shift(raw_data_x, num_unroll, axis=1)
+    next_raw_data_x = _circular_shift(raw_data_x, num_unroll, num_steps)
     raw_data_y = tf.reshape(raw_data[1 : (n_seq * num_steps + 1)],
                       [n_seq, num_steps])
-    next_raw_data_y = _circular_shift(raw_data_y, num_unroll, axis=1)
+    next_raw_data_y = _circular_shift(raw_data_y, num_unroll, num_steps)
+
     keys = tf.convert_to_tensor(
       ['seq_{}'.format(i) for i in range(n_seq)], name="key", dtype=tf.string)
     seq_len = tf.tile([num_steps], [n_seq])
     data = tf.data.Dataset.from_tensor_slices(
       (keys, raw_data_x, next_raw_data_x, raw_data_y, next_raw_data_y, seq_len))
+    data = data.repeat(epoch)
     iterator = data.make_one_shot_iterator()
     next_key, next_x, next_next_x, next_y, next_next_y, next_len = iterator.get_next()
     seq_dict = {'x':next_x, 'next_x':next_next_x, 'y':next_y, 'next_y':next_next_y}
