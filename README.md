@@ -2,11 +2,9 @@
 
 ## Synthetic Gradient for Recurrent Neural Networks
 
-![Synthetic Gradient for RNN](img/sgrnn.gif?raw=true)
 
-This repo contains a tensorflow implementation of the synthetic gradient for recurrent neural network architecture.
-
-
+This repo contains a tensorflow implementation of the synthetic gradient for
+recurrent neural network architectures.
 
 
 The data required to run the model is in the data/ dir of the
@@ -14,11 +12,11 @@ PTB dataset from Tomas Mikolov's webpage:
 ```bash
 $ wget http://www.fit.vutbr.cz/~imikolov/rnnlm/simple-examples.tgz
 $ tar xvf simple-examples.tgz
-
 ```
+
 To run the RNN model,
 ```bash
-$ python sgrnn/main.py --model=test --data_path=simple-examples/data/ \
+$ python sgrnn/main.py --model=small --data_path=simple-examples/data/ \
     --num_gpus=0 --rnn_mode=BASIC --save_path=/tmp/sgrnn
 ```
 
