@@ -70,11 +70,38 @@ class SyntheticGradientRNN(object):
     else:
       return self._init_state
 
-  def build_synthetic_gradient_rnn(self, inputs, next_inputs, sequence_length):
-    inputs = tf.unstack(inputs, num=self.num_unroll, axis=1)
-    next_inputs = tf.unstack(next_inputs, num=self.num_unroll, axis=1)
+  # def build_synthetic_gradient_rnn(self, inputs, next_inputs, sequence_length):
+  #   inputs = tf.unstack(inputs, num=self.num_unroll, axis=1)
+  #   next_inputs = tf.unstack(next_inputs, num=self.num_unroll, axis=1)
+  #
+  #   with tf.name_scope('RNN'):
+  #     outputs, final_state = tf.nn.static_state_saving_rnn(
+  #       cell=self.cell,
+  #       inputs=inputs,
+  #       state_saver=self.state_saver,
+  #       state_name=self.state_name,
+  #       sequence_length=sequence_length)
+  #
+  #   with tf.name_scope('synthetic_gradient'):
+  #     next_output, _ = self.cell(next_inputs[0], final_state)
+  #
+  #   synthetic_gradient = tf.slice(
+  #     outputs[0], begin=[0, self.output_size], size=[-1, -1])
+  #   synthetic_gradient = tf.split(
+  #     synthetic_gradient, nest.flatten(self.state_size), axis=1)
+  #   next_synthetic_gradient = tf.slice(
+  #     next_output, begin=[0, self.output_size], size=[-1, -1])
+  #   next_synthetic_gradient = tf.split(
+  #     next_synthetic_gradient, nest.flatten(self.state_size), axis=1)
+  #
+  #   with tf.variable_scope('logits'):
+  #     stacked_outputs = tf.stack(outputs, axis=1)
+  #     logits = tf.slice(stacked_outputs, begin=[0, 0, 0], size=[-1, -1, self.output_size])
+  #   return logits, final_state, synthetic_gradient, next_synthetic_gradient
 
+  def build_synthetic_gradient_rnn(self, inputs, sequence_length):
     with tf.name_scope('RNN'):
+      inputs = tf.unstack(inputs, num=self.num_unroll, axis=1)
       outputs, final_state = tf.nn.static_state_saving_rnn(
         cell=self.cell,
         inputs=inputs,
@@ -82,22 +109,27 @@ class SyntheticGradientRNN(object):
         state_name=self.state_name,
         sequence_length=sequence_length)
 
-    with tf.name_scope('synthetic_gradient'):
+      with tf.name_scope('synthetic_gradient'):
+        synthetic_gradient = tf.slice(
+          outputs[0], begin=[0, self.output_size], size=[-1, -1])
+        synthetic_gradient = tf.split(
+          synthetic_gradient, nest.flatten(self.state_size), axis=1)
+
+      with tf.name_scope('logits'):
+        stacked_outputs = tf.stack(outputs, axis=1)
+        logits = tf.slice(stacked_outputs, begin=[0, 0, 0], size=[-1, -1, self.output_size])
+
+    return logits, final_state, synthetic_gradient
+
+  def build_next_synthetic_gradient(self, final_state, next_inputs):
+    with tf.name_scope('next_synthetic_gradient'):
+      next_inputs = tf.unstack(next_inputs, num=self.num_unroll, axis=1)
       next_output, _ = self.cell(next_inputs[0], final_state)
-
-    synthetic_gradient = tf.slice(
-      outputs[0], begin=[0, self.output_size], size=[-1, -1])
-    synthetic_gradient = tf.split(
-      synthetic_gradient, nest.flatten(self.state_size), axis=1)
-    next_synthetic_gradient = tf.slice(
-      next_output, begin=[0, self.output_size], size=[-1, -1])
-    next_synthetic_gradient = tf.split(
-      next_synthetic_gradient, nest.flatten(self.state_size), axis=1)
-
-    with tf.variable_scope('logits'):
-      stacked_outputs = tf.stack(outputs, axis=1)
-      logits = tf.slice(stacked_outputs, begin=[0, 0, 0], size=[-1, -1, self.output_size])
-    return logits, final_state, synthetic_gradient, next_synthetic_gradient
+      next_synthetic_gradient = tf.slice(
+        next_output, begin=[0, self.output_size], size=[-1, -1])
+      next_synthetic_gradient = tf.split(
+        next_synthetic_gradient, nest.flatten(self.state_size), axis=1)
+    return next_synthetic_gradient
 
   @property
   def zero_state(self):

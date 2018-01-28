@@ -170,8 +170,9 @@ class PTBModel(SyntheticGradientRNN):
       inputs = tf.nn.dropout(inputs, self.config.keep_prob)
       next_inputs = tf.nn.dropout(next_inputs, self.config.keep_prob)
 
-    logits, final_state, sg, next_sg = self.build_synthetic_gradient_rnn(
-      inputs, next_inputs, self.sequence_length)
+    logits, final_state, sg = self.build_synthetic_gradient_rnn(
+      inputs, self.sequence_length)
+    next_sg = self.build_next_synthetic_gradient(final_state, next_inputs)
 
     self._final_state = final_state
 
