@@ -520,7 +520,7 @@ def main(_):
         train_ops={"train": m.train_op, "train_sg": m.train_sg_op},
         verbose=True, summary_op=summary_op, summary_writer=train_writer)
       print("Epoch: %d Train Perplexity: %.3f" % (i + 1, train_perplexity))
-      valid_perplexity = run_epoch(session, mvalid, global_step=global_step,
+      valid_perplexity, global_step = run_epoch(session, mvalid, global_step=global_step,
                                    summary_op=summary_op, summary_writer=valid_writer)
       print("Epoch: %d Valid Perplexity: %.3f" % (i + 1, valid_perplexity))
 
