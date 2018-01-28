@@ -473,6 +473,7 @@ def main(_):
         init_states=m.init_state_dict)
       m.build_graph(train_input)
     tf.summary.scalar("Training Loss", m.cost)
+    tf.summary.scalar("Synthetic Gradient MSE", m.sg_cost)
     tf.summary.scalar("Learning Rate", m.lr)
 
   with tf.name_scope("Valid"):
