@@ -5,7 +5,6 @@ from __future__ import print_function
 import os
 
 import tensorflow as tf
-from tensorflow.python.util import nest
 
 from sgrnn import main
 from sgrnn import reader
@@ -13,13 +12,7 @@ from sgrnn import reader
 
 class BuildGraphTest(tf.test.TestCase):
 
-  # def setUp(self):
-  #   self.xs = tf.placeholder(
-  #     tf.float32, shape=[batch_size, max_time, n_feats]) # [batch_size, max_time, n_feats]
-  #   self.seq_len = tf.placeholder(tf.int32, shape=[batch_size])
-  #   self.init_state = tf.placeholder(tf.float32, shape=[batch_size, n_feats])
-
-  def test_main(self):
+  def test_PTBInput(self):
     config = main.TestConfig()
     model = main.PTBModel(config=config, is_training=True)
     dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -29,5 +22,4 @@ class BuildGraphTest(tf.test.TestCase):
     raw_data = reader.ptb_raw_data(data_path)
     train_data, valid_data, test_data, _ = raw_data
     inputs = main.PTBInput(config=config, data=test_data, init_states=model.init_state_dict)
-
     model.build_graph(inputs)

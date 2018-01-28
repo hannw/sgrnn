@@ -10,10 +10,6 @@ import tensorflow as tf
 from tensorflow.python.util import nest
 
 import reader
-import util
-
-from tensorflow.python.client import device_lib
-from tensorflow.python import debug as tf_debug
 from sgrnn.model import SyntheticGradientRNN
 
 flags = tf.flags
@@ -241,73 +237,12 @@ class PTBModel(SyntheticGradientRNN):
   def final_state(self):
     return self._final_state
 
-  def gradient(self, loss, tvars, next_sg, final_state):
-    grad_local = tf.gradients(ys=loss, xs=tvars, grad_ys=None,
-                              name='local_gradients')
-    received_sg = [tf.where(self.is_done, tf.zeros_like(nsg), nsg) for nsg in next_sg]
-    grad_sg = tf.gradients(
-      ys=nest.flatten(final_state), xs=tvars, grad_ys=received_sg,
-      name='synthetic_gradients')
-    grad = [tf.add(gl, gs) if gs is not None else gl for gl, gs in zip(grad_local, grad_sg)]
-    return grad
-
-  def sg_target(self, loss, next_sg, final_state):
-    local_grad = tf.gradients(ys=loss, xs=nest.flatten(self.init_state))
-    next_sg = [tf.where(self.is_done, tf.zeros_like(grad), grad) for grad in next_sg]
-    future_grad = tf.gradients(
-      ys=nest.flatten(final_state),
-      xs=nest.flatten(self.init_state),
-      grad_ys=next_sg)
-    # for two sequence, the target is bootstrapped
-    # at the end sequence, the target is only single sequence
-    sg_target = [tf.stop_gradient(tf.add(lg, fg))
-      for lg, fg in zip(local_grad, future_grad)]
-    return sg_target
-
   @property
   def lr(self):
     return self._lr
 
   def assign_lr(self, session, lr_value):
     session.run(self._lr_update, feed_dict={self._new_lr: lr_value})
-
-  def export_ops(self, name):
-    """Exports ops to collections."""
-    self._name = name
-    ops = {util.with_prefix(self._name, "cost"): self._cost}
-    if self._is_training:
-      ops.update(lr=self._lr, new_lr=self._new_lr, lr_update=self._lr_update)
-      if self._rnn_params:
-        ops.update(rnn_params=self._rnn_params)
-    for name, op in ops.items():
-      tf.add_to_collection(name, op)
-    self._initial_state_name = util.with_prefix(self._name, "initial")
-    self._final_state_name = util.with_prefix(self._name, "final")
-    util.export_state_tuples(self._init_state, self._initial_state_name)
-    util.export_state_tuples(self._final_state, self._final_state_name)
-
-  def import_ops(self):
-    """Imports ops from collections."""
-    if self._is_training:
-      self._train_op = tf.get_collection_ref("train_op")[0]
-      self._lr = tf.get_collection_ref("lr")[0]
-      self._new_lr = tf.get_collection_ref("new_lr")[0]
-      self._lr_update = tf.get_collection_ref("lr_update")[0]
-      rnn_params = tf.get_collection_ref("rnn_params")
-      if self._cell and rnn_params:
-        params_saveable = tf.contrib.cudnn_rnn.RNNParamsSaveable(
-            self._cell,
-            self._cell.params_to_canonical,
-            self._cell.canonical_to_params,
-            rnn_params,
-            base_variable_scope="Model/RNN")
-        tf.add_to_collection(tf.GraphKeys.SAVEABLE_OBJECTS, params_saveable)
-    self._cost = tf.get_collection_ref(util.with_prefix(self._name, "cost"))[0]
-    num_replicas = FLAGS.num_gpus if self._name == "Train" else 1
-    self._initial_state = util.import_state_tuples(
-        self._initial_state, self._initial_state_name, num_replicas)
-    self._final_state = util.import_state_tuples(
-        self._final_state, self._final_state_name, num_replicas)
 
 
 class SmallConfig(object):
@@ -457,9 +392,6 @@ def main(_):
   train_data, valid_data, test_data, _ = raw_data
 
   config = get_config()
-  # eval_config = get_config()
-  # eval_config.batch_size = 1
-  # eval_config.num_steps = 1
 
   initializer = tf.random_uniform_initializer(-config.init_scale,
                                               config.init_scale)
@@ -488,20 +420,16 @@ def main(_):
 
   summary_op = tf.summary.merge_all()
 
-  # with tf.name_scope("Test"):
-  #
-  #   with tf.variable_scope("Model", reuse=True, initializer=initializer):
-  #     mtest = PTBModel(is_training=False, config=eval_config)
-  #     test_input = PTBInput(
-  #       config=eval_config, data=test_data,
-  #       init_states=mtest.init_state_dict,name="TestInput")
-  #     mtest.build_graph(test_input)
+  with tf.name_scope("Test"):
 
-  # models = {"Train": m, "Valid": mvalid, "Test": mtest}
-
+    with tf.variable_scope("Model", reuse=True, initializer=initializer):
+      mtest = PTBModel(is_training=False, config=config)
+      test_input = PTBInput(
+        config=config, data=test_data,
+        init_states=mtest.init_state_dict, name="TestInput")
+      mtest.build_graph(test_input)
 
   with tf.Session() as session:
-    # session = tf_debug.LocalCLIDebugWrapperSession(session)
     train_writer = tf.summary.FileWriter(FLAGS.save_path + '/train',
                                          session.graph)
     valid_writer = tf.summary.FileWriter(FLAGS.save_path + '/valid')
@@ -525,102 +453,11 @@ def main(_):
                                    summary_op=summary_op, summary_writer=valid_writer)
       print("Epoch: %d Valid Perplexity: %.3f" % (i + 1, valid_perplexity))
 
+    test_perplexity, global_step = run_epoch(session, mtest, global_step=global_step)
+    print("Test Perplexity: %.3f" % test_perplexity)
+
     coord.request_stop()
     coord.join(threads)
-    # test_perplexity = run_epoch(session, mtest)
-    # print("Test Perplexity: %.3f" % test_perplexity)
-
-
-# def main(_):
-#   if not FLAGS.data_path:
-#     raise ValueError("Must set --data_path to PTB data directory")
-#   gpus = [
-#       x.name for x in device_lib.list_local_devices() if x.device_type == "GPU"
-#   ]
-#   if FLAGS.num_gpus > len(gpus):
-#     raise ValueError(
-#         "Your machine has only %d gpus "
-#         "which is less than the requested --num_gpus=%d."
-#         % (len(gpus), FLAGS.num_gpus))
-#
-#   raw_data = reader.ptb_raw_data(FLAGS.data_path)
-#   train_data, valid_data, test_data, _ = raw_data
-#
-#   config = get_config()
-#   eval_config = get_config()
-#   eval_config.batch_size = 1
-#   eval_config.num_steps = 1
-#
-#   with tf.Graph().as_default():
-#     initializer = tf.random_uniform_initializer(-config.init_scale,
-#                                                 config.init_scale)
-#
-#     with tf.name_scope("Train"):
-#
-#       with tf.variable_scope("Model", reuse=None, initializer=initializer):
-#         m = PTBModel(is_training=True, config=config)
-#         train_input = PTBInput(
-#           config=config, data=train_data, name="TrainInput",
-#           init_states=m.init_state_dict)
-#         m.build_graph(train_input)
-#       tf.summary.scalar("Training Loss", m.cost)
-#       tf.summary.scalar("Learning Rate", m.lr)
-#
-#     with tf.name_scope("Valid"):
-#
-#       with tf.variable_scope("Model", reuse=True, initializer=initializer):
-#         mvalid = PTBModel(is_training=False, config=config)
-#         valid_input = PTBInput(
-#           config=config, data=valid_data, name="ValidInput",
-#           init_states=mvalid.init_state_dict)
-#         mvalid.build_graph(valid_input)
-#       tf.summary.scalar("Validation Loss", mvalid.cost)
-#
-#     with tf.name_scope("Test"):
-#
-#       with tf.variable_scope("Model", reuse=True, initializer=initializer):
-#         mtest = PTBModel(is_training=False, config=eval_config)
-#         test_input = PTBInput(
-#           config=eval_config, data=test_data,
-#           init_states=mtest.init_state_dict,name="TestInput")
-#         mtest.build_graph(test_input)
-#
-#     models = {"Train": m, "Valid": mvalid, "Test": mtest}
-#     for name, model in models.items():
-#       model.export_ops(name)
-#     metagraph = tf.train.export_meta_graph()
-#     if tf.__version__ < "1.1.0" and FLAGS.num_gpus > 1:
-#       raise ValueError("num_gpus > 1 is not supported for TensorFlow versions "
-#                        "below 1.1.0")
-#     soft_placement = False
-#     if FLAGS.num_gpus > 1:
-#       soft_placement = True
-#       util.auto_parallel(metagraph, m)
-#
-#   with tf.Graph().as_default():
-#     tf.train.import_meta_graph(metagraph)
-#     for model in models.values():
-#       model.import_ops()
-#     sv = tf.train.Supervisor(logdir=FLAGS.save_path)
-#     config_proto = tf.ConfigProto(allow_soft_placement=soft_placement)
-#     with sv.managed_session(config=config_proto) as session:
-#       for i in range(config.max_max_epoch):
-#         lr_decay = config.lr_decay ** max(i + 1 - config.max_epoch, 0.0)
-#         m.assign_lr(session, config.learning_rate * lr_decay)
-#
-#         print("Epoch: %d Learning rate: %.3f" % (i + 1, session.run(m.lr)))
-#         train_perplexity = run_epoch(session, m, eval_op=m.train_op,
-#                                      verbose=True)
-#         print("Epoch: %d Train Perplexity: %.3f" % (i + 1, train_perplexity))
-#         valid_perplexity = run_epoch(session, mvalid)
-#         print("Epoch: %d Valid Perplexity: %.3f" % (i + 1, valid_perplexity))
-#
-#       test_perplexity = run_epoch(session, mtest)
-#       print("Test Perplexity: %.3f" % test_perplexity)
-#
-#       if FLAGS.save_path:
-#         print("Saving model to %s." % FLAGS.save_path)
-#         sv.saver.save(session, FLAGS.save_path, global_step=sv.global_step)
 
 
 if __name__ == "__main__":

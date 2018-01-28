@@ -104,18 +104,11 @@ def ptb_producer(raw_data, batch_size, num_steps, name=None):
     return x, y
 
 
-# def _circular_shift(x, step_size, axis):
-#   with tf.name_scope("circular_shift"):
-#     size = tf.shape(x)[axis]
-#     x0, x1 = tf.split(x, [step_size, size - step_size], axis=axis)
-#     x = tf.concat([x1, x0], axis=axis)
-#     assert False
-#   return x
-
-def _circular_shift(x, step_size, num_steps):
+def _circular_shift(x, step_size, axis):
   with tf.name_scope("circular_shift"):
-    x0, x1 = tf.split(x, [step_size, num_steps - step_size], axis=1)
-    x = tf.concat([x1, x0], axis=1)
+    size = tf.shape(x)[axis]
+    x0, x1 = tf.split(x, [step_size, size - step_size], axis=axis)
+    x = tf.concat([x1, x0], axis=axis)
   return x
 
 
@@ -129,10 +122,10 @@ def pdb_state_saver(raw_data, batch_size, num_steps, init_states,
     # need to make sure the num_step is multiple of num_unroll
     raw_data_x = tf.reshape(raw_data[0 : n_seq * num_steps],
                       [n_seq, num_steps])
-    next_raw_data_x = _circular_shift(raw_data_x, num_unroll, num_steps)
+    next_raw_data_x = _circular_shift(raw_data_x, num_unroll, axis=1)
     raw_data_y = tf.reshape(raw_data[1 : (n_seq * num_steps + 1)],
                       [n_seq, num_steps])
-    next_raw_data_y = _circular_shift(raw_data_y, num_unroll, num_steps)
+    next_raw_data_y = _circular_shift(raw_data_y, num_unroll, axis=1)
 
     keys = tf.convert_to_tensor(
       ['seq_{}'.format(i) for i in range(n_seq)], name="key", dtype=tf.string)

@@ -155,4 +155,31 @@ class SyntheticGradientRNN(object):
     state_sizes = nest.flatten(self.base_cell.state_size)
     return sum(state_sizes)
 
+  def gradient(self, loss, tvars, next_sg, final_state):
+    grad_local = tf.gradients(ys=loss, xs=tvars, grad_ys=None,
+                              name='local_gradients')
+    received_sg = [tf.where(self.is_done, tf.zeros_like(nsg), nsg) for nsg in next_sg]
+    grad_sg = tf.gradients(
+      ys=nest.flatten(final_state), xs=tvars, grad_ys=received_sg,
+      name='synthetic_gradients')
+    grad = [tf.add(gl, gs) if gs is not None else gl for gl, gs in zip(grad_local, grad_sg)]
+    return grad
+
+  def sg_target(self, loss, next_sg, final_state):
+    local_grad = tf.gradients(ys=loss, xs=nest.flatten(self.init_state))
+    next_sg = [tf.where(self.is_done, tf.zeros_like(grad), grad) for grad in next_sg]
+    future_grad = tf.gradients(
+      ys=nest.flatten(final_state),
+      xs=nest.flatten(self.init_state),
+      grad_ys=next_sg)
+    # for two sequence, the target is bootstrapped
+    # at the end sequence, the target is only single sequence
+    sg_target = [tf.stop_gradient(tf.add(lg, fg))
+      for lg, fg in zip(local_grad, future_grad)]
+    return sg_target
+
+  @property
+  def is_done(self):
+    return self._is_done
+
 
