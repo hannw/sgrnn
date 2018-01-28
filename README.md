@@ -1,5 +1,5 @@
 # sgrnn
 
-## synthetic gradient for RNN
+## synthetic gradient of RNN
 
-![synthetic gradient of RNN](img/sgrnn.gif =250x)
+![synthetic gradient of RNN](img/sgrnn.gif?raw=true=250x)
