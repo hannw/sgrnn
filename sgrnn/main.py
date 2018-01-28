@@ -187,7 +187,6 @@ class PTBModel(SyntheticGradientRNN):
     tvars = tf.trainable_variables()
 
     grad = self.gradient(loss, tvars, next_sg, final_state)
-    # grad_var = list(zip(grad, tvars))
 
     sg_target = self.sg_target(loss, next_sg, final_state)
     sg_loss = tf.losses.mean_squared_error(labels=tf.stack(sg_target), predictions=tf.stack(sg))

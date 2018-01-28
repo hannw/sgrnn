@@ -74,7 +74,7 @@ class SyntheticGradientRNN(object):
     inputs = tf.unstack(inputs, num=self.num_unroll, axis=1)
     next_inputs = tf.unstack(next_inputs, num=self.num_unroll, axis=1)
 
-    with tf.variable_scope('RNN') as scope:
+    with tf.name_scope('RNN'):
       outputs, final_state = tf.nn.static_state_saving_rnn(
         cell=self.cell,
         inputs=inputs,
@@ -82,19 +82,15 @@ class SyntheticGradientRNN(object):
         state_name=self.state_name,
         sequence_length=sequence_length)
 
-    with tf.variable_scope(scope, reuse=True):
-      next_outputs, next_final_state = tf.nn.static_rnn(
-        cell=self.cell,
-        inputs=next_inputs,
-        initial_state=final_state,
-        sequence_length=sequence_length)
+    with tf.name_scope('synthetic_gradient'):
+      next_output, _ = self.cell(next_inputs[0], final_state)
 
     synthetic_gradient = tf.slice(
       outputs[0], begin=[0, self.output_size], size=[-1, -1])
     synthetic_gradient = tf.split(
       synthetic_gradient, nest.flatten(self.state_size), axis=1)
     next_synthetic_gradient = tf.slice(
-      next_outputs[0], begin=[0, self.output_size], size=[-1, -1])
+      next_output, begin=[0, self.output_size], size=[-1, -1])
     next_synthetic_gradient = tf.split(
       next_synthetic_gradient, nest.flatten(self.state_size), axis=1)
 
