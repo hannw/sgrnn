@@ -2,4 +2,4 @@
 
 ## synthetic gradient for RNN
 
-![Alt text](img/sgrnn.gif?raw=true "Title")
+![synthetic gradient of RNN](img/sgrnn.gif =250x)
