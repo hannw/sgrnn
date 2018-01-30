@@ -3,8 +3,9 @@
 ## Synthetic Gradient for Recurrent Neural Networks
 
 
-This repo contains a tensorflow implementation of the synthetic gradient for
-recurrent neural network architectures.
+This repo is a tensorflow implementation of the synthetic gradient, or DNI, for
+recurrent neural network (RNN). The architecture contains a multilayer LSTM RNN that
+is used for language modeling to do word-level prediction. For a detailed description of how synthetic gradient is applied to train this architecture, check out the blog post [here](https://hannw.github.io/posts/synthetic-gradient-rnn).
 
 
 The data required to run the model is in the data/ dir of the
